@@ -1,0 +1,6 @@
+Flask
+groq
+google-search-results
+elevenlabs
+mtranslate
+gunicorn
