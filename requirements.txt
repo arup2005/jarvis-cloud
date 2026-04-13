@@ -1,6 +1,8 @@
-Flask
+flask
 groq
-google-search-results
 elevenlabs
+google-search-results
+serpapi
 mtranslate
+requests
 gunicorn
