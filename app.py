@@ -1,106 +1,163 @@
-import os
-import tempfile
 from flask import Flask, request, jsonify, send_file
 from groq import Groq
-from serpapi.google_search import GoogleSearch
 from elevenlabs.client import ElevenLabs
+from serpapi import GoogleSearch
 from mtranslate import translate
+import requests
+import uuid, os, json
 
 app = Flask(__name__)
 
-# 🔑 ENV VARIABLES
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")
+# 🔑 ENV KEYS
+GROQ_KEY = os.getenv("GROQ_API_KEY")
+ELEVEN_KEY = os.getenv("ELEVENLABS_API_KEY")
+SERP_KEY = os.getenv("SERPAPI_KEY")
 
-client = Groq(api_key=GROQ_API_KEY)
-tts_client = ElevenLabs(api_key=ELEVEN_API_KEY)
+groq = Groq(api_key=GROQ_KEY)
+tts = ElevenLabs(api_key=ELEVEN_KEY)
 
-memory = {}
+MEMORY_FILE = "memory.json"
 
-def translate_text(text):
+# 🧠 MEMORY
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE) as f:
+            return json.load(f)
+    return {"history": []}
+
+def save_memory(mem):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(mem, f)
+
+# 🌍 TRANSLATE
+def to_english(text):
     try:
         return translate(text, "en")
     except:
         return text
 
+# 🔎 GOOGLE SEARCH
 def search_google(query):
+    params = {
+        "q": query,
+        "api_key": SERP_KEY
+    }
+    search = GoogleSearch(params)
+    results = search.get_dict()
+
     try:
-        params = {"q": query, "api_key": SERPAPI_KEY}
-        results = GoogleSearch(params).get_dict()
+        return results["organic_results"][0]["snippet"]
+    except:
+        return ""
 
-        if "answer_box" in results:
-            return results["answer_box"].get("answer") or results["answer_box"].get("snippet")
+# ⚡ FAST SPEECH (Groq Whisper API)
+def speech_to_text(file_path):
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-        if "organic_results" in results:
-            return results["organic_results"][0].get("snippet")
+    headers = {
+        "Authorization": f"Bearer {GROQ_KEY}"
+    }
 
-    except Exception as e:
-        return str(e)
+    files = {
+        "file": open(file_path, "rb")
+    }
 
-    return None
+    data = {
+        "model": "whisper-large-v3"
+    }
 
-def ask_ai(user_id, prompt):
-    if user_id not in memory:
-        memory[user_id] = []
+    response = requests.post(url, headers=headers, files=files, data=data)
+    return response.json()["text"]
 
-    memory[user_id].append({"role": "user", "content": prompt})
-    memory[user_id] = memory[user_id][-5:]
+# 🎤 SPEECH ROUTE
+@app.route("/speech", methods=["POST"])
+def speech():
+    file = request.files['audio']
+    fname = f"{uuid.uuid4()}.wav"
+    file.save(fname)
 
-    response = client.chat.completions.create(
-        model="moonshotai/kimi-k2-instruct-0905",
-        messages=[{"role": "system", "content": "You are Jarvis. Be short and smart."}] + memory[user_id]
-    )
+    text = speech_to_text(fname)
+    os.remove(fname)
 
-    reply = response.choices[0].message.content
-    memory[user_id].append({"role": "assistant", "content": reply})
+    translated = to_english(text)
 
-    return reply
+    return jsonify({
+        "original": text,
+        "translated": translated
+    })
 
-def jarvis_brain(user_id, text):
-    result = search_google(text)
-    if result:
-        return result
-    return ask_ai(user_id, text)
-
-def generate_audio(text):
-    audio_stream = tts_client.text_to_speech.convert(
-        voice_id="CwhRBWXzGAHq8TQ4Fs17",
-        model_id="eleven_multilingual_v2",
-        text=text
-    )
-
-    audio_bytes = b"".join(audio_stream)
-
-    file_path = "/tmp/output.mp3"
-    with open(file_path, "wb") as f:
-        f.write(audio_bytes)
-
-    return file_path
-
-# ✅ TEXT API
+# 🤖 MAIN AI
 @app.route("/ask", methods=["POST"])
 def ask():
-    data = request.json
-    user_id = data.get("user_id", "esp32")
-    text = translate_text(data.get("text", ""))
+    user_text = request.json["text"]
 
-    reply = jarvis_brain(user_id, text)
+    # 🔎 search trigger
+    use_search = any(w in user_text.lower() for w in [
+        "what", "who", "when", "where", "price", "news", "today"
+    ])
 
-    return jsonify({"reply": reply})
+    search_data = search_google(user_text) if use_search else ""
 
-# ✅ VOICE API
-@app.route("/voice", methods=["POST"])
-def voice():
-    data = request.json
-    user_id = data.get("user_id", "esp32")
-    text = translate_text(data.get("text", ""))
+    memory = load_memory()
+    history = memory["history"][-5:]
 
-    reply = jarvis_brain(user_id, text)
-    audio_path = generate_audio(reply)
+    system_prompt = f"""
+You are Jarvis AI.
 
-    return send_file(audio_path, mimetype="audio/mpeg")
+Use this info if available:
+{search_data}
 
+Respond naturally in English.
+
+Return JSON:
+{{"reply":"...", "emotion":"happy/sad/angry/neutral/excited"}}
+"""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    messages += history
+    messages.append({"role": "user", "content": user_text})
+
+    res = groq.chat.completions.create(
+        messages=messages,
+        model="moonshotai/kimi-k2-instruct-0905"
+    )
+
+    content = res.choices[0].message.content
+
+    try:
+        data = json.loads(content)
+    except:
+        data = {"reply": content, "emotion": "neutral"}
+
+    reply = data["reply"]
+    emotion = data["emotion"]
+
+    # 💾 SAVE MEMORY
+    memory["history"].append({"role": "user", "content": user_text})
+    memory["history"].append({"role": "assistant", "content": reply})
+    save_memory(memory)
+
+    # 🔊 TTS
+    audio = tts.generate(text=reply, voice="Rachel")
+
+    fname = f"{uuid.uuid4()}.mp3"
+    with open(fname, "wb") as f:
+        f.write(audio)
+
+    return jsonify({
+        "reply": reply,
+        "emotion": emotion,
+        "audio": "/audio/" + fname
+    })
+
+@app.route("/audio/<file>")
+def audio(file):
+    return send_file(file, mimetype="audio/mpeg")
+
+# HEALTH CHECK (for UptimeRobot)
 @app.route("/")
 def home():
-    return "Jarvis Cloud Running 🚀"
+    return "Jarvis Running 🚀"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
