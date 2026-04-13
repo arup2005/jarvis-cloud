@@ -1,13 +1,7 @@
 services:
   - type: web
-    name: jarvis-cloud
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
-    envVars:
-      - key: GROQ_API_KEY
-        sync: false
-      - key: SERPAPI_KEY
-        sync: false
-      - key: ELEVEN_API_KEY
-        sync: false
+    name: jarvis-ai
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app"
