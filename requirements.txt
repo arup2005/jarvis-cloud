@@ -6,3 +6,5 @@ serpapi
 mtranslate
 requests
 gunicorn
+openai-whisper
+torch
